@@ -1,0 +1,56 @@
+# Dependencies
+vendor/
+node_modules/
+
+# IDE & Editor files
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+.project
+.buildpath
+.settings/
+*.tmproj
+*.code-workspace
+.atom/
+.phpintel/
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# PHP & Testing
+.phpunit.result.cache
+.php_cs.cache
+.php-cs-fixer.cache
+.phpunit.cache
+coverage/
+.phpcs-cache
+
+# Package files
+composer.lock
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# SSH Keys
+.ssh/
+
+# Project specific
+.xpos.pid
