@@ -59,21 +59,23 @@ class XposServiceProvider extends ServiceProvider
         }
 
         try {
+            $trustedIPs = ['127.0.0.1', '::1'];
+
             // Laravel 11+ has TrustProxies::at() method
             if (method_exists(\Illuminate\Http\Middleware\TrustProxies::class, 'at')) {
-                \Illuminate\Http\Middleware\TrustProxies::at('*');
+                \Illuminate\Http\Middleware\TrustProxies::at($trustedIPs);
             } else {
                 // Laravel 10 fallback: use Request::setTrustedProxies()
                 request()->setTrustedProxies(
-                    ['*'],
+                    $trustedIPs,
                     \Illuminate\Http\Request::HEADER_X_FORWARDED_FOR |
                     \Illuminate\Http\Request::HEADER_X_FORWARDED_HOST |
                     \Illuminate\Http\Request::HEADER_X_FORWARDED_PORT |
                     \Illuminate\Http\Request::HEADER_X_FORWARDED_PROTO
                 );
             }
-        } catch (\Throwable) {
-            // Silently fail if request not available
+        } catch (\Throwable $e) {
+            logger()->warning('XPOS: failed to configure TrustProxies', ['error' => $e->getMessage()]);
         }
     }
 }
