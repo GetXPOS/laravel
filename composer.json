@@ -36,7 +36,10 @@
         "laravel": {
             "providers": [
                 "GetXPOS\\Laravel\\XposServiceProvider"
-            ]
+            ],
+            "aliases": {
+                "Xpos": "GetXPOS\\Laravel\\Facades\\Xpos"
+            }
         }
     },
     "config": {

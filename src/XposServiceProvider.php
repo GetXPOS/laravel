@@ -13,6 +13,15 @@ class XposServiceProvider extends ServiceProvider
     public function register(): void
     {
         $this->mergeConfigFrom(__DIR__ . '/../config/xpos.php', 'xpos');
+
+        $this->app->singleton('xpos', function () {
+            return new class {
+                public function connect(array $options = []): \GetXPOS\Laravel\XposTunnel
+                {
+                    return \GetXPOS\Laravel\XposTunnel::connect($options);
+                }
+            };
+        });
     }
 
     /**

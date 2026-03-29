@@ -3,6 +3,7 @@
 namespace GetXPOS\Laravel\Commands;
 
 use GetXPOS\Laravel\Support\ServeManager;
+use GetXPOS\Laravel\XposTunnel;
 use Illuminate\Console\Command;
 use Symfony\Component\Console\Attribute\AsCommand;
 use Symfony\Component\Process\Process;
@@ -19,7 +20,8 @@ class XposCommand extends Command
         {--no-serve : Skip starting artisan serve (use existing server)}
         {--token= : XPOS auth token (overrides XPOS_TOKEN env)}
         {--subdomain= : Reserved subdomain name (Pro plan)}
-        {--domain= : Custom domain (Business plan)}';
+        {--domain= : Custom domain (Business plan)}
+        {--mode=http : Tunnel mode (http or tcp)}';
 
     /**
      * The console command description.
@@ -27,9 +29,9 @@ class XposCommand extends Command
     protected $description = 'Create an XPOS tunnel to expose your Laravel app publicly';
 
     /**
-     * The SSH tunnel process.
+     * The XposTunnel instance.
      */
-    protected ?Process $tunnelProcess = null;
+    protected ?XposTunnel $tunnel = null;
 
     /**
      * The serve process (if we started it).
@@ -42,27 +44,25 @@ class XposCommand extends Command
     protected bool $weStartedServe = false;
 
     /**
-     * The parsed public URL.
-     */
-    protected ?string $publicUrl = null;
-
-    /**
-     * The parsed expiry timestamp.
-     */
-    protected ?string $expiresAt = null;
-
-    /**
      * Execute the console command.
      */
     public function handle(): int
     {
+        $mode = $this->option('mode');
+
+        // Validate mode
+        if (!in_array($mode, ['http', 'tcp'], true)) {
+            $this->error('  Mode must be "http" or "tcp"');
+            return self::FAILURE;
+        }
+
         // Validate mutually exclusive options
         if ($this->option('subdomain') && $this->option('domain')) {
             $this->error('  Cannot use --subdomain and --domain together');
             return self::FAILURE;
         }
 
-        $token = $this->resolveToken();
+        $token = XposTunnel::resolveToken($this->option('token'));
 
         // Subdomain/domain require authentication
         if (($this->option('subdomain') || $this->option('domain')) && !$token) {
@@ -72,7 +72,14 @@ class XposCommand extends Command
             return self::FAILURE;
         }
 
-        $this->displayBanner($token);
+        // TCP mode requires --port explicitly
+        if ($mode === 'tcp' && !$this->option('port')) {
+            $this->error('  TCP mode requires --port');
+            $this->line('  <fg=gray>Example: php artisan xpos --mode=tcp --port=5432 --token=tk_xxx</>');
+            return self::FAILURE;
+        }
+
+        $this->displayBanner($token, $mode);
 
         // Check if SSH is available
         if (!$this->sshExists()) {
@@ -81,81 +88,83 @@ class XposCommand extends Command
             return self::FAILURE;
         }
 
+        // Determine port
         $serveManager = new ServeManager();
-        $port = $this->determinePort($serveManager);
+        $port = null;
 
-        if ($port === null) {
-            return self::FAILURE;
+        if ($mode === 'tcp') {
+            // TCP mode: use --port directly, no auto-serve
+            $port = (int) $this->option('port');
+        } else {
+            // HTTP mode: existing port resolution with auto-serve
+            $port = $this->determinePort($serveManager);
+            if ($port === null) {
+                return self::FAILURE;
+            }
         }
 
-        // Create the tunnel
+        // Create tunnel
         $this->newLine();
         $this->line('  <fg=gray>Creating tunnel to XPOS...</>');
 
-        $tunnelResult = $this->createTunnel($port, $token);
+        $this->tunnel = new XposTunnel([
+            'port' => $port,
+            'host' => $this->option('host'),
+            'token' => $this->option('token'),
+            'subdomain' => $this->option('subdomain'),
+            'domain' => $this->option('domain'),
+            'mode' => $mode,
+        ]);
 
-        if ($tunnelResult !== self::SUCCESS) {
+        // Set output callback — filter lines, display errors/passthrough
+        $this->tunnel->onOutput(function (string $buffer) {
+            $lines = explode("\n", $buffer);
+            foreach ($lines as $line) {
+                $line = trim($line, "\r\n ");
+
+                if (XposTunnel::shouldFilterLine($line)) {
+                    continue;
+                }
+
+                // Show errors in red
+                if (preg_match('/^Error:\s*(.+)/', $line, $errorMatch)) {
+                    $this->error("  {$errorMatch[1]}");
+                    continue;
+                }
+
+                // Pass through unexpected output in gray
+                $this->line("  <fg=gray>{$line}</>");
+            }
+        });
+
+        try {
+            $this->tunnel->start();
+        } catch (\RuntimeException $e) {
+            // Only show connection-level errors (timeout, process death)
+            // SSH "Error: ..." lines were already displayed by onOutput callback
+            $msg = $e->getMessage();
+            if (str_starts_with($msg, 'Tunnel connection') || str_starts_with($msg, 'Tunnel is already')) {
+                $this->newLine();
+                $this->error('  ' . $msg);
+            }
             $this->cleanup($serveManager);
-            return $tunnelResult;
+            return self::FAILURE;
         }
 
-        // Keep running until user presses Ctrl+C (Unix) or process ends (Windows)
+        // Display URL box
+        $this->displayTunnelUrl($this->tunnel->url);
+
+        // Display expiry in yellow
+        if ($this->tunnel->expiresAt) {
+            $this->line('  <fg=yellow>' . XposTunnel::formatExpiry($this->tunnel->expiresAt) . '</>');
+        }
+
+        // Keep running until user presses Ctrl+C or process ends
         $this->registerShutdownHandler($serveManager);
-
-        // Wait for tunnel process
-        while ($this->tunnelProcess && $this->tunnelProcess->isRunning()) {
-            usleep(100000); // 100ms
-        }
-
+        $this->tunnel->wait();
         $this->cleanup($serveManager);
 
         return self::SUCCESS;
-    }
-
-    /**
-     * Resolve the auth token from option or config.
-     */
-    protected function resolveToken(): ?string
-    {
-        $token = $this->option('token') ?? config('xpos.token');
-
-        if (!$token) {
-            return null;
-        }
-
-        // Normalize: prepend tk_ if missing
-        if (!str_starts_with($token, 'tk_')) {
-            $token = 'tk_' . $token;
-        }
-
-        return $token;
-    }
-
-    /**
-     * Build the SSH username from token presence.
-     */
-    protected function buildSshUser(?string $token): string
-    {
-        return $token ?? 'x';
-    }
-
-    /**
-     * Build the -R remote forward argument.
-     */
-    protected function buildRemoteForward(int $port, string $host): string
-    {
-        $domain = $this->option('domain');
-        $subdomain = $this->option('subdomain');
-
-        if ($domain) {
-            return "{$domain}:80:{$host}:{$port}";
-        }
-
-        if ($subdomain) {
-            return "{$subdomain}:80:{$host}:{$port}";
-        }
-
-        return "0:{$host}:{$port}";
     }
 
     /**
@@ -200,7 +209,7 @@ class XposCommand extends Command
     /**
      * Display the XPOS banner.
      */
-    protected function displayBanner(?string $token): void
+    protected function displayBanner(?string $token, string $mode = 'http'): void
     {
         $this->newLine();
         $this->line('  <fg=cyan;options=bold>XPOS Tunnel</>');
@@ -210,6 +219,10 @@ class XposCommand extends Command
             $this->line('  <fg=gray>Mode:</>       <fg=green>Authenticated</>');
         } else {
             $this->line('  <fg=gray>Mode:</>       <fg=yellow>Anonymous (3hr expiry)</>');
+        }
+
+        if ($mode === 'tcp') {
+            $this->line('  <fg=gray>Type:</>       <fg=white>TCP</>');
         }
 
         if ($this->option('subdomain')) {
@@ -272,129 +285,6 @@ class XposCommand extends Command
     }
 
     /**
-     * Create the SSH tunnel to XPOS.
-     */
-    protected function createTunnel(int $port, ?string $token): int
-    {
-        $server = config('xpos.server', 'go.xpos.dev');
-        $sshPort = config('xpos.ssh_port', 443);
-        $sshUser = $this->buildSshUser($token);
-        $host = $this->option('host');
-        $remoteForward = $this->buildRemoteForward($port, $host);
-
-        $command = [
-            'ssh',
-            '-p', (string) $sshPort,
-            '-o', 'StrictHostKeyChecking=no',
-            '-o', 'UserKnownHostsFile=/dev/null',
-            '-o', 'LogLevel=ERROR',
-            '-o', 'BatchMode=yes',
-            '-o', 'ConnectTimeout=10',
-            '-R', $remoteForward,
-            "{$sshUser}@{$server}",
-        ];
-
-        $this->tunnelProcess = new Process($command);
-        $this->tunnelProcess->setTimeout(null);
-
-        $urlDisplayed = false;
-        $outputBuffer = '';
-
-        $this->tunnelProcess->start(function ($type, $buffer) use (&$urlDisplayed, &$outputBuffer) {
-            $outputBuffer .= $buffer;
-
-            // Parse HTTPS URL from structured output
-            if (!$this->publicUrl && preg_match('/HTTPS:\s+(https:\/\/\S+)/i', $outputBuffer, $matches)) {
-                $this->publicUrl = rtrim($matches[1], "\r\n");
-            }
-
-            // Fallback: parse HTTP URL
-            if (!$this->publicUrl && preg_match('/HTTP:\s+(https?:\/\/\S+)/i', $outputBuffer, $matches)) {
-                $this->publicUrl = rtrim($matches[1], "\r\n");
-            }
-
-            // Parse expiry
-            if (!$this->expiresAt && preg_match('/Expires:\s+(\S+)/', $outputBuffer, $matches)) {
-                $this->expiresAt = rtrim($matches[1], "\r\n");
-            }
-
-            // Display URL once parsed
-            if ($this->publicUrl && !$urlDisplayed) {
-                $urlDisplayed = true;
-                $this->displayTunnelUrl($this->publicUrl);
-
-                if ($this->expiresAt) {
-                    $this->line('  ' . $this->formatExpiry($this->expiresAt));
-                }
-            }
-
-            // Filter and display output lines
-            $lines = explode("\n", $buffer);
-            foreach ($lines as $line) {
-                $line = trim($line, "\r\n ");
-
-                if (empty($line)) {
-                    continue;
-                }
-
-                // Suppress lines we display ourselves
-                if (str_contains($line, 'Tunnel created')
-                    || str_contains($line, 'HTTP:')
-                    || str_contains($line, 'HTTPS:')
-                    || str_contains($line, 'Press Ctrl+C')
-                    || str_contains($line, 'Expires:')
-                ) {
-                    continue;
-                }
-
-                // Show errors in red
-                if (preg_match('/^Error:\s*(.+)/', $line, $errorMatch)) {
-                    $this->error("  {$errorMatch[1]}");
-                    continue;
-                }
-
-                // Pass through unexpected output in gray
-                $this->line("  <fg=gray>{$line}</>");
-            }
-        });
-
-        // Wait for URL to appear (max 15 seconds)
-        $waitedMs = 0;
-        $maxWaitMs = 15000;
-        while (!$this->publicUrl && $waitedMs < $maxWaitMs && $this->tunnelProcess->isRunning()) {
-            usleep(100000); // 100ms
-            $waitedMs += 100;
-
-            if ($waitedMs > 0 && $waitedMs % 2000 === 0 && !$urlDisplayed) {
-                $this->output->write('.');
-            }
-        }
-
-        if (!$this->tunnelProcess->isRunning()) {
-            $this->newLine();
-            $this->error('  Tunnel connection failed');
-            $errorOutput = trim($this->tunnelProcess->getErrorOutput());
-            if (!empty($errorOutput)) {
-                $this->line("  <fg=gray>{$errorOutput}</>");
-            }
-            return self::FAILURE;
-        }
-
-        // Show expiry if it arrived after URL was already displayed
-        if ($this->publicUrl && $urlDisplayed && $this->expiresAt) {
-            // Already shown above in the callback
-        }
-
-        if (!$this->publicUrl) {
-            $this->newLine();
-            $this->warn('  <fg=yellow>Tunnel connected but URL not detected</>');
-            $this->line('  <fg=gray>Check the output above for your URL</>');
-        }
-
-        return self::SUCCESS;
-    }
-
-    /**
      * Display the tunnel URL in a nice box.
      */
     protected function displayTunnelUrl(string $url): void
@@ -403,12 +293,18 @@ class XposCommand extends Command
 
         $padding = 3;
         $urlLength = strlen($url);
-        $boxWidth = $urlLength + ($padding * 2);
+        $boxWidth = max($urlLength + ($padding * 2), 40);
         $horizontalLine = str_repeat('─', $boxWidth);
-        $emptySpace = str_repeat(' ', $padding);
+
+        // Center the URL within the box
+        $totalPadding = $boxWidth - $urlLength;
+        $leftPadding = (int) floor($totalPadding / 2);
+        $rightPadding = $totalPadding - $leftPadding;
+        $leftSpace = str_repeat(' ', $leftPadding);
+        $rightSpace = str_repeat(' ', $rightPadding);
 
         $this->line("  <fg=green>┌{$horizontalLine}┐</>");
-        $this->line("  <fg=green>│</>{$emptySpace}<fg=white;options=bold>{$url}</>{$emptySpace}<fg=green>│</>");
+        $this->line("  <fg=green>│</>{$leftSpace}<fg=white;options=bold>{$url}</>{$rightSpace}<fg=green>│</>");
         $this->line("  <fg=green>└{$horizontalLine}┘</>");
 
         $this->newLine();
@@ -417,41 +313,13 @@ class XposCommand extends Command
     }
 
     /**
-     * Format an RFC3339 expiry timestamp into a human-readable countdown.
-     */
-    protected function formatExpiry(string $rfc3339): string
-    {
-        try {
-            $expires = new \DateTimeImmutable($rfc3339);
-            $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
-            $diff = $now->diff($expires);
-
-            $parts = [];
-            if ($diff->h > 0 || $diff->days > 0) {
-                $totalHours = ($diff->days * 24) + $diff->h;
-                $parts[] = "{$totalHours}h";
-            }
-            if ($diff->i > 0) {
-                $parts[] = "{$diff->i}m";
-            }
-
-            $countdown = implode(' ', $parts) ?: '< 1m';
-            $utcTime = $expires->setTimezone(new \DateTimeZone('UTC'))->format('H:i');
-
-            return "<fg=gray>Expires in {$countdown} ({$utcTime} UTC)</>";
-        } catch (\Throwable) {
-            return "<fg=gray>Expires: {$rfc3339}</>";
-        }
-    }
-
-    /**
      * Clean up processes on exit.
      */
     protected function cleanup(ServeManager $serveManager): void
     {
-        // Stop tunnel process
-        if ($this->tunnelProcess && $this->tunnelProcess->isRunning()) {
-            $this->tunnelProcess->stop(3);
+        // Stop tunnel
+        if ($this->tunnel) {
+            $this->tunnel->close();
         }
 
         // Stop serve process only if we started it
