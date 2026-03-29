@@ -18,7 +18,7 @@ Instant public URLs for Laravel development. Expose your local app with a single
 - **Custom Domains** — use your own domain like `dev.example.com` (Business plan)
 - **Auto-Start Server** — starts `php artisan serve` automatically if not running
 - **Auto TrustProxies** — HTTPS URLs work correctly out of the box
-- **Laravel 10, 11, 12** — full support
+- **Laravel 10+** — full support
 
 ## Installation
 
@@ -233,7 +233,7 @@ This works with `*.xpos.to` subdomains, custom domains, and any future tunnel do
 ## Requirements
 
 - PHP 8.1+
-- Laravel 10, 11, or 12
+- Laravel 10+
 - SSH client in PATH
 
 ## Troubleshooting
