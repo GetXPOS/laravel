@@ -199,7 +199,7 @@ $tunnel = Xpos::connect([
     'token' => 'tk_xxx',
 ]);
 
-echo $tunnel->url; // 203.0.113.5:34567 (ip:port)
+echo $tunnel->url; // myapp.xpos.to:34567
 
 $tunnel->close();
 ```

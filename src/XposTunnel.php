@@ -75,6 +75,15 @@ class XposTunnel
         if (!in_array($this->mode, ['http', 'tcp'], true)) {
             throw new \InvalidArgumentException('Mode must be "http" or "tcp"');
         }
+
+        if ($this->subdomain && $this->domain) {
+            throw new \InvalidArgumentException('Cannot use both "subdomain" and "domain"');
+        }
+        if (($this->subdomain || $this->domain) && !$this->token) {
+            throw new \InvalidArgumentException(
+                ($this->domain ? '"domain"' : '"subdomain"') . ' requires a token'
+            );
+        }
     }
 
     /**
@@ -115,6 +124,9 @@ class XposTunnel
         if ($this->connected) {
             throw new \RuntimeException('Tunnel is already connected');
         }
+
+        $this->url = null;
+        $this->expiresAt = null;
 
         $args = $this->buildArgs();
         $this->process = new Process($args);
@@ -304,7 +316,7 @@ class XposTunnel
             '/^Expires:/i',
             '/^Press Ctrl\+C/i',
             '/^Tunnel closed/i',
-            '/^\d+\.\d+\.\d+\.\d+:\d+$/',
+            '/^\S+:\d+$/',
         ];
 
         foreach ($patterns as $pattern) {
