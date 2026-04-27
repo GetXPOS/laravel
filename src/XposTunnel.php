@@ -59,11 +59,14 @@ class XposTunnel
      */
     public function __construct(array $options = [])
     {
-        if (!isset($options['port'])) {
-            throw new \InvalidArgumentException('The "port" option is required');
+        $port = filter_var($options['port'] ?? null, FILTER_VALIDATE_INT, [
+            'options' => ['min_range' => 1, 'max_range' => 65535],
+        ]);
+        if ($port === false) {
+            throw new \InvalidArgumentException('port is required (1-65535)');
         }
 
-        $this->port = (int) $options['port'];
+        $this->port = $port;
         $this->host = $options['host'] ?? 'localhost';
         $this->token = static::resolveToken($options['token'] ?? null);
         $this->subdomain = $options['subdomain'] ?? null;
