@@ -67,7 +67,10 @@ class XposTunnel
         }
 
         $this->port = $port;
-        $this->host = $options['host'] ?? 'localhost';
+        // Default to 127.0.0.1 (not localhost) to avoid IPv6 ::1 resolution
+        // mismatches when the dev server only binds IPv4. Matches the CLI
+        // default in XposCommand.php and the other XPOS SDKs.
+        $this->host = $options['host'] ?? '127.0.0.1';
         $this->token = static::resolveToken($options['token'] ?? null);
         $this->subdomain = $options['subdomain'] ?? null;
         $this->domain = $options['domain'] ?? null;
