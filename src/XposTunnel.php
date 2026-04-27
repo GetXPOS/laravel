@@ -75,6 +75,9 @@ class XposTunnel
         if (!in_array($this->mode, ['http', 'tcp'], true)) {
             throw new \InvalidArgumentException('Mode must be "http" or "tcp"');
         }
+        if ($this->mode === 'tcp' && !$this->token) {
+            throw new \InvalidArgumentException('tcp mode requires a token');
+        }
 
         if ($this->subdomain && $this->domain) {
             throw new \InvalidArgumentException('Cannot use both "subdomain" and "domain"');
