@@ -72,6 +72,14 @@ class XposCommand extends Command
             return self::FAILURE;
         }
 
+        // TCP mode requires authentication — server rejects anonymous TCP
+        // tunnels, fail early with a useful message instead of timing out.
+        if ($mode === 'tcp' && !$token) {
+            $this->error('  TCP mode requires authentication');
+            $this->line('  <fg=gray>Set XPOS_TOKEN in .env or use --token=<your-token></>');
+            return self::FAILURE;
+        }
+
         // TCP mode requires --port explicitly
         if ($mode === 'tcp' && !$this->option('port')) {
             $this->error('  TCP mode requires --port');
