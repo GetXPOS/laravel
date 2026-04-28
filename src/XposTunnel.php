@@ -220,6 +220,7 @@ class XposTunnel
         // Check if process died
         if (!$this->process->isRunning() && !$this->url) {
             $errorOutput = trim($this->process->getErrorOutput());
+            $this->cleanupHostKeys();
             throw new \RuntimeException(
                 'Tunnel connection failed' . ($errorOutput ? ": {$errorOutput}" : '')
             );
