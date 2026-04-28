@@ -2,6 +2,7 @@
 
 namespace GetXPOS\Laravel;
 
+use GetXPOS\Laravel\Support\HostKeys;
 use Symfony\Component\Process\Process;
 
 class XposTunnel
@@ -50,6 +51,19 @@ class XposTunnel
      */
     private const CONNECT_TIMEOUT = 15;
     private const KILL_TIMEOUT = 3;
+
+    /** Default SSH server (must match the well-known fleet domain). */
+    private const DEFAULT_SERVER = 'go.xpos.dev';
+
+    /**
+     * Path to the per-process known_hosts file pinning the xpos.dev
+     * fleet's host key. Null when the caller is using a custom server
+     * (pinning doesn't apply) or before start() runs.
+     */
+    private ?string $knownHostsPath = null;
+
+    /** Closure that removes the known_hosts temp dir; null when none. */
+    private $knownHostsCleanup = null;
 
     /**
      * Create a new XposTunnel instance.
@@ -136,6 +150,18 @@ class XposTunnel
 
         $this->url = null;
         $this->expiresAt = null;
+
+        // Resolve the SSH host key before spawning ssh. Fail closed: if we
+        // cannot produce a pinned known_hosts file (network down AND no
+        // fresh disk cache), refuse to connect rather than silently fall
+        // back to TOFU. Custom servers skip pinning (returns null path).
+        try {
+            $resolved = HostKeys::resolve($this->server, $this->sshPort, self::DEFAULT_SERVER);
+        } catch (\Throwable $err) {
+            throw new \RuntimeException('ssh host key pinning: ' . $err->getMessage(), 0, $err);
+        }
+        $this->knownHostsPath = $resolved['path'];
+        $this->knownHostsCleanup = $resolved['cleanup'];
 
         $args = $this->buildArgs();
         $this->process = new Process($args);
@@ -234,6 +260,7 @@ class XposTunnel
         }
 
         $this->process = null;
+        $this->cleanupHostKeys();
 
         if ($this->onCloseCallback) {
             ($this->onCloseCallback)(null);
@@ -252,6 +279,7 @@ class XposTunnel
         $this->connected = false;
         $exitCode = $this->process?->getExitCode() ?? 1;
         $this->process = null;
+        $this->cleanupHostKeys();
 
         if ($this->onCloseCallback) {
             ($this->onCloseCallback)($exitCode);
@@ -372,19 +400,37 @@ class XposTunnel
 
     /**
      * Build the SSH command arguments.
+     *
+     * When connecting to the official xpos.dev fleet (server matches
+     * DEFAULT_SERVER), the SDK pins the SSH host key it fetched from
+     * https://xpos.dev/.well-known/ssh-host-keys via a per-process
+     * known_hosts file referenced by $this->knownHostsPath. For custom
+     * servers $this->knownHostsPath stays null and the legacy accept-new
+     * behaviour is used. The well-known URL is hard-coded to xpos.dev
+     * and only valid for that fleet.
      */
     private function buildArgs(): array
     {
-        return [
-            'ssh',
-            '-p', (string) $this->sshPort,
-            '-o', 'StrictHostKeyChecking=accept-new',
-            '-o', 'UserKnownHostsFile=~/.ssh/xpos_known_hosts',
-            '-o', 'LogLevel=ERROR',
-            '-o', 'ConnectTimeout=10',
-            '-R', $this->buildRemoteForward(),
-            $this->buildSshUser() . '@' . $this->server,
-        ];
+        $hostKeyOpts = $this->knownHostsPath
+            ? [
+                '-o', 'StrictHostKeyChecking=yes',
+                '-o', 'UserKnownHostsFile=' . $this->knownHostsPath,
+            ]
+            : [
+                '-o', 'StrictHostKeyChecking=accept-new',
+                '-o', 'UserKnownHostsFile=~/.ssh/xpos_known_hosts',
+            ];
+
+        return array_merge(
+            ['ssh', '-p', (string) $this->sshPort],
+            $hostKeyOpts,
+            [
+                '-o', 'LogLevel=ERROR',
+                '-o', 'ConnectTimeout=10',
+                '-R', $this->buildRemoteForward(),
+                $this->buildSshUser() . '@' . $this->server,
+            ]
+        );
     }
 
     /**
@@ -475,6 +521,28 @@ class XposTunnel
     {
         if ($this->process && $this->process->isRunning()) {
             $this->process->stop(self::KILL_TIMEOUT);
+        }
+        // Reclaim the per-process known_hosts temp dir even when the
+        // connection failed before reaching close() — start() throws on
+        // timeout/error after spawn but the cleanup must still run.
+        $this->cleanupHostKeys();
+    }
+
+    /**
+     * Run the pinning cleanup closure exactly once. Safe to call from
+     * multiple paths; idempotent.
+     */
+    private function cleanupHostKeys(): void
+    {
+        if ($this->knownHostsCleanup) {
+            $cleanup = $this->knownHostsCleanup;
+            $this->knownHostsCleanup = null;
+            $this->knownHostsPath = null;
+            try {
+                $cleanup();
+            } catch (\Throwable) {
+                // best-effort
+            }
         }
     }
 
