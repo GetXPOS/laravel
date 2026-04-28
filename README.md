@@ -236,6 +236,25 @@ This works with `*.xpos.to` subdomains, custom domains, and any future tunnel do
 - Laravel 10+
 - SSH client in PATH
 
+## Security
+
+The auth token is passed as the SSH username (`<token>@go.xpos.dev`), so it
+briefly appears in the local `ssh` process's argv. On a shared or audited
+host other local users may be able to read it via `ps`,
+`/proc/<pid>/cmdline`, or system audit logs.
+
+To minimize exposure:
+
+- **Set `XPOS_TOKEN` in `.env`** rather than passing `--token=tk_xxx` on
+  the command line. The token still ends up in the spawned `ssh` argv,
+  but it stays out of shell history, source control, and CI logs.
+- **Rotate tokens regularly** and revoke any token you suspect was
+  exposed — manage tokens at [xpos.dev/dashboard/tokens](https://xpos.dev/dashboard/tokens).
+- **Avoid running on shared multi-user hosts** where untrusted local
+  users can inspect process state.
+
+A protocol change to remove argv exposure is on the roadmap.
+
 ## Troubleshooting
 
 **Port already in use?**
