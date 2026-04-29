@@ -174,7 +174,7 @@ class XposTunnel
             $cfgPath = $this->writeSshConfig();
         } catch (\Throwable $err) {
             $this->cleanupHostKeys();
-        $this->cleanupSshConfig();
+            $this->cleanupSshConfig();
             throw new \RuntimeException('write ssh_config: ' . $err->getMessage(), 0, $err);
         }
 
@@ -236,7 +236,7 @@ class XposTunnel
         if (!$this->process->isRunning() && !$this->url) {
             $errorOutput = trim($this->process->getErrorOutput());
             $this->cleanupHostKeys();
-        $this->cleanupSshConfig();
+            $this->cleanupSshConfig();
             throw new \RuntimeException(
                 'Tunnel connection failed' . ($errorOutput ? ": {$errorOutput}" : '')
             );
@@ -418,21 +418,16 @@ class XposTunnel
     // -------------------------------------------------------------------------
 
     /**
-     * Build the SSH command arguments.
-     *
-     * When connecting to the official xpos.dev fleet (server matches
-     * DEFAULT_SERVER), the SDK pins the SSH host key it fetched from
-     * https://xpos.dev/.well-known/ssh-host-keys via a per-process
-     * known_hosts file referenced by $this->knownHostsPath. For custom
-     * servers $this->knownHostsPath stays null and the legacy accept-new
-     * behaviour is used. The well-known URL is hard-coded to xpos.dev
-     * and only valid for that fleet.
-     */
-    /**
      * Render the per-process ssh_config body. The auth token lives in the
      * `User` directive inside the file rather than on argv so
      * `ps`/`/proc/<pid>/cmdline` don't surface it. HostKeyAlias MUST exactly
      * match the marker the host-keys writer uses (`[host]:port`).
+     *
+     * For the xpos.dev fleet the SDK pins the host key fetched from
+     * https://xpos.dev/.well-known/ssh-host-keys via a per-process
+     * known_hosts file referenced by $this->knownHostsPath. For custom
+     * servers $this->knownHostsPath stays null and the legacy accept-new
+     * behaviour is used. The well-known URL is hard-coded to xpos.dev.
      */
     private function buildSshConfig(): string
     {
