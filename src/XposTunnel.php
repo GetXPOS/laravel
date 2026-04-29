@@ -62,6 +62,13 @@ class XposTunnel
      */
     private ?string $knownHostsPath = null;
 
+    /**
+     * Per-process ssh_config dir (mode 0700). The auth token (User
+     * directive) lives in `<dir>/config` (mode 0600) so `ps`/`/proc/<pid>/
+     * cmdline` cannot harvest it. Cleared on every exit path.
+     */
+    private ?string $sshConfigDir = null;
+
     /** Closure that removes the known_hosts temp dir; null when none. */
     private $knownHostsCleanup = null;
 
@@ -163,7 +170,15 @@ class XposTunnel
         $this->knownHostsPath = $resolved['path'];
         $this->knownHostsCleanup = $resolved['cleanup'];
 
-        $args = $this->buildArgs();
+        try {
+            $cfgPath = $this->writeSshConfig();
+        } catch (\Throwable $err) {
+            $this->cleanupHostKeys();
+        $this->cleanupSshConfig();
+            throw new \RuntimeException('write ssh_config: ' . $err->getMessage(), 0, $err);
+        }
+
+        $args = ['ssh', '-F', $cfgPath, 'xpos'];
         $this->process = new Process($args);
         $this->process->setTimeout(null);
 
@@ -221,6 +236,7 @@ class XposTunnel
         if (!$this->process->isRunning() && !$this->url) {
             $errorOutput = trim($this->process->getErrorOutput());
             $this->cleanupHostKeys();
+        $this->cleanupSshConfig();
             throw new \RuntimeException(
                 'Tunnel connection failed' . ($errorOutput ? ": {$errorOutput}" : '')
             );
@@ -262,6 +278,7 @@ class XposTunnel
 
         $this->process = null;
         $this->cleanupHostKeys();
+        $this->cleanupSshConfig();
 
         if ($this->onCloseCallback) {
             ($this->onCloseCallback)(null);
@@ -281,6 +298,7 @@ class XposTunnel
         $exitCode = $this->process?->getExitCode() ?? 1;
         $this->process = null;
         $this->cleanupHostKeys();
+        $this->cleanupSshConfig();
 
         if ($this->onCloseCallback) {
             ($this->onCloseCallback)($exitCode);
@@ -410,28 +428,115 @@ class XposTunnel
      * behaviour is used. The well-known URL is hard-coded to xpos.dev
      * and only valid for that fleet.
      */
-    private function buildArgs(): array
+    /**
+     * Render the per-process ssh_config body. The auth token lives in the
+     * `User` directive inside the file rather than on argv so
+     * `ps`/`/proc/<pid>/cmdline` don't surface it. HostKeyAlias MUST exactly
+     * match the marker the host-keys writer uses (`[host]:port`).
+     */
+    private function buildSshConfig(): string
     {
-        $hostKeyOpts = $this->knownHostsPath
-            ? [
-                '-o', 'StrictHostKeyChecking=yes',
-                '-o', 'UserKnownHostsFile=' . $this->knownHostsPath,
-            ]
-            : [
-                '-o', 'StrictHostKeyChecking=accept-new',
-                '-o', 'UserKnownHostsFile=~/.ssh/xpos_known_hosts',
-            ];
+        [$bind, $target] = $this->buildRemoteForwardConfig();
+        $user = $this->buildSshUser();
 
-        return array_merge(
-            ['ssh', '-p', (string) $this->sshPort],
-            $hostKeyOpts,
-            [
-                '-o', 'LogLevel=ERROR',
-                '-o', 'ConnectTimeout=10',
-                '-R', $this->buildRemoteForward(),
-                $this->buildSshUser() . '@' . $this->server,
-            ]
-        );
+        if ($this->knownHostsPath) {
+            $knownHostsBlock = "    StrictHostKeyChecking yes\n"
+                . '    UserKnownHostsFile ' . self::quoteSshConfigPath($this->knownHostsPath) . "\n";
+        } else {
+            $knownHostsBlock = "    StrictHostKeyChecking accept-new\n"
+                . '    UserKnownHostsFile ' . self::quoteSshConfigPath('~/.ssh/xpos_known_hosts') . "\n";
+        }
+
+        return "Host xpos\n"
+            . "    HostName {$this->server}\n"
+            . "    HostKeyAlias [{$this->server}]:{$this->sshPort}\n"
+            . "    User {$user}\n"
+            . "    Port {$this->sshPort}\n"
+            . $knownHostsBlock
+            . "    LogLevel ERROR\n"
+            . "    ConnectTimeout 10\n"
+            . "    RemoteForward {$bind} {$target}\n";
+    }
+
+    /**
+     * Materialize the ssh_config in a private 0700 dir with file mode 0600.
+     * Returns the file path. Caller MUST invoke cleanupSshConfig() on every
+     * exit path. Don't use tempnam() alone — its parent (/tmp) is sticky-bit
+     * world-writable, so we wrap the file in our own private dir.
+     */
+    private function writeSshConfig(): string
+    {
+        $base = sys_get_temp_dir();
+        // Mimic mkdtemp: retry until exclusive creation succeeds.
+        for ($i = 0; $i < 8; $i++) {
+            $dir = $base . DIRECTORY_SEPARATOR . 'xpos-ssh-' . bin2hex(random_bytes(6));
+            if (@mkdir($dir, 0700, false)) {
+                @chmod($dir, 0700);
+                $cfg = $dir . DIRECTORY_SEPARATOR . 'config';
+                $bytes = file_put_contents($cfg, $this->buildSshConfig(), LOCK_EX);
+                if ($bytes === false) {
+                    @rmdir($dir);
+                    throw new \RuntimeException('failed to write ssh_config');
+                }
+                @chmod($cfg, 0600);
+                $this->sshConfigDir = $dir;
+                return $cfg;
+            }
+        }
+        throw new \RuntimeException('failed to create ssh_config dir');
+    }
+
+    /**
+     * Recursively remove the per-process ssh_config dir if any. Idempotent.
+     */
+    private function cleanupSshConfig(): void
+    {
+        $dir = $this->sshConfigDir;
+        $this->sshConfigDir = null;
+        if (!$dir || !is_dir($dir)) {
+            return;
+        }
+        $entries = @scandir($dir);
+        if ($entries !== false) {
+            foreach ($entries as $entry) {
+                if ($entry === '.' || $entry === '..') {
+                    continue;
+                }
+                @unlink($dir . DIRECTORY_SEPARATOR . $entry);
+            }
+        }
+        @rmdir($dir);
+    }
+
+    /**
+     * Build the bind/target pair for an ssh_config RemoteForward directive.
+     * @return array{0:string,1:string} [bind, target]
+     */
+    private function buildRemoteForwardConfig(): array
+    {
+        $target = "{$this->host}:{$this->port}";
+        if ($this->domain) {
+            return ["{$this->domain}:80", $target];
+        }
+        if ($this->subdomain) {
+            return ["{$this->subdomain}:80", $target];
+        }
+        return ['0', $target];
+    }
+
+    /**
+     * Quote a value for ssh_config. OpenSSH on Windows accepts forward
+     * slashes, so we normalize backslashes before quoting to sidestep
+     * escaping. Only wraps in double quotes when needed.
+     */
+    private static function quoteSshConfigPath(string $value): string
+    {
+        $normalized = str_replace('\\', '/', $value);
+        if (!preg_match('/[\s"\\\\]/', $normalized)) {
+            return $normalized;
+        }
+        $escaped = str_replace(['\\', '"'], ['\\\\', '\\"'], $normalized);
+        return '"' . $escaped . '"';
     }
 
     /**
@@ -527,6 +632,7 @@ class XposTunnel
         // connection failed before reaching close() — start() throws on
         // timeout/error after spawn but the cleanup must still run.
         $this->cleanupHostKeys();
+        $this->cleanupSshConfig();
     }
 
     /**
