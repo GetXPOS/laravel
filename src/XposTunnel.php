@@ -114,6 +114,22 @@ class XposTunnel
                 ($this->domain ? '"domain"' : '"subdomain"') . ' requires a token'
             );
         }
+
+        // Reject control / whitespace in any value rendered into ssh_config.
+        // ssh_config is line-based — a stray newline (e.g. injected via
+        // config('xpos.server') from .env) would smuggle a new directive
+        // into the file.
+        self::validateSshConfigValue('server', $this->server);
+        self::validateSshConfigValue('host', $this->host);
+        if ($this->subdomain !== null) {
+            self::validateSshConfigValue('subdomain', $this->subdomain);
+        }
+        if ($this->domain !== null) {
+            self::validateSshConfigValue('domain', $this->domain);
+        }
+        if ($this->token !== null) {
+            self::validateSshConfigValue('token', $this->token);
+        }
     }
 
     /**
@@ -517,6 +533,29 @@ class XposTunnel
             return ["{$this->subdomain}:80", $target];
         }
         return ['0', $target];
+    }
+
+    /**
+     * Reject characters that would either smuggle a new directive into
+     * ssh_config (CR/LF/NUL) or produce an ambiguously-tokenised directive
+     * (whitespace inside identifier-shaped fields like User/HostName/
+     * RemoteForward bind). Reject-set is [\x00-\x20\x7F] — whitespace +
+     * control + DEL. Applied to caller-supplied identifiers (server, host,
+     * subdomain, domain, token) at the constructor boundary.
+     *
+     * @throws \InvalidArgumentException
+     */
+    private static function validateSshConfigValue(string $name, string $value): void
+    {
+        $len = strlen($value);
+        for ($i = 0; $i < $len; $i++) {
+            $code = ord($value[$i]);
+            if ($code <= 0x20 || $code === 0x7F) {
+                throw new \InvalidArgumentException(
+                    "{$name} contains disallowed control or whitespace character at byte {$i}"
+                );
+            }
+        }
     }
 
     /**
