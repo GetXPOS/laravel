@@ -123,9 +123,11 @@ class XposTunnel
         self::validateSshConfigValue('host', $this->host);
         if ($this->subdomain !== null) {
             self::validateSshConfigValue('subdomain', $this->subdomain);
+            self::validateDnsName('subdomain', $this->subdomain);
         }
         if ($this->domain !== null) {
             self::validateSshConfigValue('domain', $this->domain);
+            self::validateDnsName('domain', $this->domain);
         }
         if ($this->token !== null) {
             self::validateSshConfigValue('token', $this->token);
@@ -553,6 +555,29 @@ class XposTunnel
             if ($code <= 0x20 || $code === 0x7F) {
                 throw new \InvalidArgumentException(
                     "{$name} contains disallowed control or whitespace character at byte {$i}"
+                );
+            }
+        }
+    }
+
+    /**
+     * Validate a DNS-shaped identifier (subdomain or custom domain). Each
+     * dot-separated label must match
+     * ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ — the same per-label rule the
+     * server enforces. Catches obvious typos (foo..bar, leading/trailing
+     * hyphen, underscore, labels over 63 chars) on the client so the SSH
+     * session fails fast with a clear error rather than after a handshake
+     * with a cryptic banner.
+     *
+     * @throws \InvalidArgumentException
+     */
+    private static function validateDnsName(string $name, string $value): void
+    {
+        $labels = explode('.', strtolower($value));
+        foreach ($labels as $label) {
+            if (!preg_match('/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/', $label)) {
+                throw new \InvalidArgumentException(
+                    "{$name} is not a valid DNS name (lowercase a-z, 0-9, hyphens; no leading/trailing hyphen; max 63 chars per label)"
                 );
             }
         }
