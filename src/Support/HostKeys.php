@@ -21,6 +21,9 @@ class HostKeys
     /** Public well-known URL. Hard-coded — only valid for the official fleet. */
     public const URL = 'https://xpos.dev/.well-known/ssh-host-keys';
 
+    /** Track whether the custom-server warning has fired this process. */
+    private static bool $warnedCustomServer = false;
+
     /**
      * Bounds how long an offline SDK can rely on a stale cache. Older
      * caches are treated as missing so a rotation eventually invalidates
@@ -49,6 +52,14 @@ class HostKeys
         $noop = static function (): void {};
 
         if ($server !== $defaultServer) {
+            if (!self::$warnedCustomServer) {
+                fwrite(
+                    STDERR,
+                    "warning: xpos host-key pinning disabled for custom server '{$server}'. "
+                    . "Verify the fingerprint manually on first connect.\n"
+                );
+                self::$warnedCustomServer = true;
+            }
             return ['path' => null, 'cleanup' => $noop];
         }
 

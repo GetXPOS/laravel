@@ -48,8 +48,11 @@ class ServeManager
             return $this->cachedServingStatus = false;
         }
 
-        // Verify PID is still alive
-        if (!$this->isProcessRunning($data['pid'])) {
+        // Verify PID is still alive. Cast to int explicitly so a malformed
+        // PID file ("5; rm -rf /" or non-numeric) coerces to a safe integer
+        // before reaching shell-using fallbacks. Silences PHP 8.3+
+        // non-numeric coercion deprecation warnings as well.
+        if (!$this->isProcessRunning((int)($data['pid'] ?? 0))) {
             $this->cleanup();
             return $this->cachedServingStatus = false;
         }
@@ -257,6 +260,12 @@ class ServeManager
         ];
 
         file_put_contents($this->pidFile, json_encode($data, JSON_PRETTY_PRINT));
+
+        // Restrict to owner-only on POSIX systems so another local user can't
+        // plant a malicious PID for the next isProcessRunning() call to act on.
+        // Silenced because the file may not exist (write failure) or chmod may
+        // not be honoured on the host filesystem.
+        @chmod($this->pidFile, 0o600);
 
         // Invalidate cache
         $this->cachedPidData = $data;
