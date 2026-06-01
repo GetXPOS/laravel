@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 namespace GetXPOS\Laravel\Support;
 
 use Symfony\Component\Process\Process;
@@ -135,7 +137,12 @@ class ServeManager
             );
         }
 
-        $pid = $process->getPid();
+        // getPid() is ?int (null if the process died in the microsecond window
+        // since the isRunning() check above). Cast to int so writePidFile's
+        // int $pid param doesn't raise a TypeError under declare(strict_types=1);
+        // a null coerces to 0, which isProcessRunning() later rejects (pid <= 0)
+        // and cleans up — the same graceful path as before strict types.
+        $pid = (int) $process->getPid();
 
         // Write PID file
         $this->writePidFile($port, $pid);
@@ -241,6 +248,17 @@ class ServeManager
         if (!is_array($data) || !isset($data['port'], $data['pid'])) {
             return null;
         }
+
+        // Normalise to int up-front. Under declare(strict_types=1) a non-int
+        // port/pid (a hand-edited or corrupted PID file holding a string like
+        // "8000" or "5; rm -rf /") would raise a TypeError the moment it reached
+        // the int-typed params/returns below (isPortListening(int $port),
+        // getPort(): ?int, isProcessRunning(int $pid)). Casting here coerces a
+        // malformed value to a safe integer once, preserving the existing
+        // graceful "treat as not-serving and clean up" behaviour. (int) of a
+        // non-numeric string is 0, which the downstream guards reject.
+        $data['port'] = (int) $data['port'];
+        $data['pid'] = (int) $data['pid'];
 
         // Cache the data
         $this->cachedPidData = $data;

@@ -196,6 +196,21 @@ class HostKeys
         }
         @chmod($tmp, 0o600);
         @rename($tmp, $path);
+
+        // Best-effort: reclaim ownership of the cache file for the current
+        // user, so a file planted in the cache dir by another local user is
+        // not silently relied upon on the next load. POSIX-only — composer.json
+        // does NOT require ext-posix, so calling posix_* unguarded would fatal
+        // on Windows or in a minimal container. Guard on the functions existing,
+        // and only chown when our effective UID already owns the cache dir (we
+        // have no business chowning a dir we don't own). Skip silently
+        // otherwise — the 0600 mode on the temp file already restricts access.
+        if (function_exists('posix_getuid') && function_exists('posix_geteuid')) {
+            $dirOwner = @fileowner($dir);
+            if ($dirOwner !== false && $dirOwner === posix_geteuid()) {
+                @chown($path, posix_getuid());
+            }
+        }
     }
 
     /**
