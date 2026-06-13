@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Require token for TCP mode (validated at construction time).
 - Default tunnel host to `127.0.0.1` instead of `localhost` to avoid IPv4/IPv6 mismatch.
 - Clean up `known_hosts` temp dir when `start()` detects a dead process.
+- README Security section rewritten to match the shipped design (token in a
+  `0600` ssh_config `User` directive, not on the `ssh` argv).
+
+### Security
+- Re-derive and verify each SSH host key's SHA256 fingerprint, and reject
+  whitespace/control chars in the key fields, before writing `known_hosts` —
+  fail-closed against a tampered/buggy well-known response (matches the Go SDK).
+- Require a successfully parsed 2xx status on the `.well-known/ssh-host-keys`
+  fetch before trusting the body (treat an unparseable status as failure; keep
+  the final status across redirect hops).
 
 ## [0.2.4]
 

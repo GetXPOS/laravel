@@ -126,13 +126,22 @@ class HostKeys
         }
 
         // Parse status from $http_response_header (set by file_get_contents).
+        // A87: keep the LAST HTTP status line — file_get_contents follows
+        // redirects, so $http_response_header accumulates each hop's status and
+        // [0] could be a 3xx from a redirect chain (a latent false-reject).
         $status = 0;
-        if (isset($http_response_header) && is_array($http_response_header) && count($http_response_header) > 0) {
-            if (preg_match('#^HTTP/\S+\s+(\d+)#', (string) $http_response_header[0], $m)) {
-                $status = (int) $m[1];
+        if (isset($http_response_header) && is_array($http_response_header)) {
+            foreach ($http_response_header as $line) {
+                if (preg_match('#^HTTP/\S+\s+(\d+)#', (string) $line, $m)) {
+                    $status = (int) $m[1];
+                }
             }
         }
-        if ($status > 0 && (int) ($status / 100) !== 2) {
+        // A87: require a successfully parsed 2xx status before trusting the body.
+        // An unparseable status line ($status === 0) or any non-2xx must fail
+        // closed here, not fall through to json_decode on an error body (the
+        // empty-key-list check below was only an accidental backstop).
+        if ($status < 200 || $status >= 300) {
             throw new \RuntimeException("ssh-host-keys: HTTP {$status}");
         }
 
@@ -225,10 +234,41 @@ class HostKeys
         $path = $base . DIRECTORY_SEPARATOR . 'known_hosts';
         $lines = '';
         foreach ($doc['keys'] as $k) {
-            if (!isset($k['type'], $k['public_key'])) {
-                continue;
+            // A14/A15: fail closed before pinning, mirroring the Go SDK's
+            // verifyHostKeys. Require type / public_key / fingerprint_sha256;
+            // reject whitespace/control chars (known_hosts is line-oriented, so a
+            // newline could smuggle an extra `* <attacker-key>` wildcard pin
+            // line); and re-derive the OpenSSH SHA256 fingerprint, throwing on
+            // disagreement with the advertised one. Authenticity ultimately
+            // comes from TLS to the well-known host — this is a defense-in-depth
+            // integrity cross-check.
+            $type = $k['type'] ?? null;
+            $pub = $k['public_key'] ?? null;
+            $advertised = $k['fingerprint_sha256'] ?? null;
+            if (!is_string($type) || !is_string($pub) || !is_string($advertised)
+                || $type === '' || $pub === '' || $advertised === '') {
+                self::removeDir($base);
+                throw new \RuntimeException('ssh-host-keys: missing type/public_key/fingerprint_sha256 from server');
             }
-            $lines .= sprintf("[%s]:%d %s %s\n", $host, $port, $k['type'], $k['public_key']);
+            if (preg_match('/\s/', $type) || preg_match('/\s/', $pub)) {
+                self::removeDir($base);
+                throw new \RuntimeException('ssh-host-keys: malformed type or public_key shape from server');
+            }
+            $raw = base64_decode($pub, true);
+            if ($raw === false) {
+                self::removeDir($base);
+                throw new \RuntimeException('ssh-host-keys: public_key is not valid base64');
+            }
+            $derived = 'SHA256:' . rtrim(base64_encode(hash('sha256', $raw, true)), '=');
+            if ($derived !== $advertised) {
+                self::removeDir($base);
+                throw new \RuntimeException(sprintf(
+                    'ssh host key fingerprint mismatch: server-advertised %s != re-derived %s',
+                    $advertised,
+                    $derived
+                ));
+            }
+            $lines .= sprintf("[%s]:%d %s %s\n", $host, $port, $type, $pub);
         }
         if ($lines === '') {
             self::removeDir($base);
