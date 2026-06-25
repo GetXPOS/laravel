@@ -23,6 +23,12 @@ class XposTunnel
     public bool $connected = false;
 
     /**
+     * LV1: once the connect has resolved, the output callback stops
+     * retaining/parsing so the buffer can't grow for the tunnel's lifetime.
+     */
+    private bool $settled = false;
+
+    /**
      * The SSH process.
      */
     private ?Process $process = null;
@@ -51,6 +57,16 @@ class XposTunnel
      */
     private const CONNECT_TIMEOUT = 15;
     private const KILL_TIMEOUT = 3;
+
+    /** LV1: cap the parse buffer so a post-URL output burst can't grow it unbounded. */
+    private const MAX_PARSE_BUFFER = 65536;
+
+    /**
+     * LV1: bounded wait (ms), after the URL banner is seen, for a later-chunk
+     * "Expires:" line before resolving — resolves SUCCESS on the cap when none
+     * arrives (paid / no-expiry tiers never send it).
+     */
+    private const EXPIRY_WINDOW_MS = 500;
 
     /** Default SSH server (must match the well-known fleet domain). */
     private const DEFAULT_SERVER = 'go.xpos.dev';
@@ -175,6 +191,7 @@ class XposTunnel
 
         $this->url = null;
         $this->expiresAt = null;
+        $this->settled = false;
 
         // Resolve the SSH host key before spawning ssh. Fail closed: if we
         // cannot produce a pinned known_hosts file (network down AND no
@@ -204,11 +221,21 @@ class XposTunnel
         $error = null;
 
         $this->process->start(function ($type, $buffer) use (&$outputBuffer, &$error) {
-            $outputBuffer .= $buffer;
-
-            // Fire onOutput callback with raw text
+            // Always forward raw output to the per-chunk callback.
             if ($this->onOutputCallback) {
                 ($this->onOutputCallback)($buffer);
+            }
+
+            // LV1: once resolved, stop retaining/parsing so the buffer can't grow
+            // for the tunnel's lifetime — output was already forwarded above.
+            if ($this->settled) {
+                return;
+            }
+
+            // Accumulate, bounded.
+            $outputBuffer .= $buffer;
+            if (strlen($outputBuffer) > self::MAX_PARSE_BUFFER) {
+                $outputBuffer = substr($outputBuffer, -self::MAX_PARSE_BUFFER);
             }
 
             // Parse URL
@@ -221,9 +248,10 @@ class XposTunnel
                 $this->expiresAt = $this->parseExpiry($outputBuffer);
             }
 
-            // Check for errors (don't throw from callback — set variable for poll loop)
+            // C14: scan the ACCUMULATED buffer (not just this chunk) so an
+            // "Error:" split across a read boundary is still detected.
             if (!$error) {
-                $lines = explode("\n", $buffer);
+                $lines = explode("\n", $outputBuffer);
                 foreach ($lines as $line) {
                     $line = trim($line, "\r\n ");
                     $parsed = $this->parseError($line);
@@ -242,6 +270,18 @@ class XposTunnel
         while (!$this->url && !$error && $waitedMs < $maxWaitMs && $this->process->isRunning()) {
             usleep(100000); // 100ms
             $waitedMs += 100;
+        }
+
+        // LV1: the URL arrived but the server emits "Expires:" in a SEPARATE
+        // write that may land in a later chunk. Wait a short bounded window so
+        // $this->expiresAt is populated before start() returns (the synchronous
+        // CLI reads it immediately); resolve regardless when the cap elapses.
+        if ($this->url && !$this->expiresAt && !$error) {
+            $expiryWaitedMs = 0;
+            while (!$this->expiresAt && $expiryWaitedMs < self::EXPIRY_WINDOW_MS && $this->process->isRunning()) {
+                usleep(50000); // 50ms
+                $expiryWaitedMs += 50;
+            }
         }
 
         // Check for error from SSH output
@@ -266,6 +306,9 @@ class XposTunnel
             throw new \RuntimeException('Tunnel connection timed out');
         }
 
+        // LV1: connect resolved — the callback now only forwards output (no more
+        // appending/parsing), so the buffer stops growing during wait().
+        $this->settled = true;
         $this->connected = true;
 
         // Fire onConnect callback

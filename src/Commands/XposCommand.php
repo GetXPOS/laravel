@@ -115,14 +115,26 @@ class XposCommand extends Command
         $this->newLine();
         $this->line('  <fg=gray>Creating tunnel to XPOS...</>');
 
-        $this->tunnel = new XposTunnel([
-            'port' => $port,
-            'host' => $this->option('host'),
-            'token' => $this->option('token'),
-            'subdomain' => $this->option('subdomain'),
-            'domain' => $this->option('domain'),
-            'mode' => $mode,
-        ]);
+        try {
+            $this->tunnel = new XposTunnel([
+                'port' => $port,
+                'host' => $this->option('host'),
+                'token' => $this->option('token'),
+                'subdomain' => $this->option('subdomain'),
+                'domain' => $this->option('domain'),
+                'mode' => $mode,
+            ]);
+        } catch (\Throwable $e) {
+            // M2: the constructor validates input (control/whitespace in
+            // host/server, bad DNS) and throws \InvalidArgumentException, which
+            // the narrow \RuntimeException catch around start() below would miss
+            // — leaking the serve child started in determinePort() and orphaning
+            // .xpos.pid. Catch here, clean up, and fail.
+            $this->newLine();
+            $this->error('  ' . $e->getMessage());
+            $this->cleanup($serveManager);
+            return self::FAILURE;
+        }
 
         // Set output callback — filter lines, display errors/passthrough
         $this->tunnel->onOutput(function (string $buffer) {
@@ -248,10 +260,10 @@ class XposCommand extends Command
     protected function determinePort(ServeManager $serveManager): ?int
     {
         $host = $this->option('host');
+        $portOption = $this->option('port');
 
         // If --no-serve, require an already running server
         if ($this->option('no-serve')) {
-            $portOption = $this->option('port');
             $port = $portOption !== null ? (int) $portOption : (int) config('xpos.default_port', 8000);
 
             if (!$serveManager->isPortListening($port, $host)) {
@@ -264,15 +276,37 @@ class XposCommand extends Command
             return $port;
         }
 
-        // Check if serve is already running for this project
-        $existingPort = $serveManager->getRunningPort();
-        if ($existingPort !== null) {
-            $this->line("  <fg=green>✓</> Found running server on <fg=white>http://{$host}:{$existingPort}</>");
-            return $existingPort;
+        // Check if a tracked serve is already running for this project (C16:
+        // host-aware). runningServe() cleans up a dead PID file and returns null.
+        $serve = $serveManager->runningServe();
+        if ($serve !== null) {
+            if ($serve['host'] === $host && $serveManager->isPortListening($serve['port'], $host)) {
+                // Reuse the live tracked serve on the matching host.
+                // C17: an explicit --port that differs is overridden by the
+                // running server — say so instead of silently dropping it.
+                if ($portOption !== null && (int) $portOption !== $serve['port']) {
+                    $this->line("  <fg=yellow>Note: a tracked dev server is already running on port {$serve['port']}; ignoring --port={$portOption}.</>");
+                }
+                $this->line("  <fg=green>✓</> Found running server on <fg=white>http://{$host}:{$serve['port']}</>");
+                return $serve['port'];
+            }
+
+            if ($serve['host'] === $host) {
+                // PID alive but not serving on the host — wedged. Clean up and
+                // start fresh below.
+                $serveManager->cleanup();
+            } else {
+                // C16: a live tracked serve on a DIFFERENT host. Overwriting the
+                // PID file here would orphan it (cleanup() only unlinks the file,
+                // it never stops the process). Warn and fail, mirroring the
+                // --no-serve failure path.
+                $this->error("  A tracked dev server is already live on {$serve['host']}:{$serve['port']}.");
+                $this->line("  <fg=gray>Stop it, or re-run with --host={$serve['host']}.</>");
+                return null;
+            }
         }
 
         // Start a new serve process
-        $portOption = $this->option('port');
         $defaultPort = $portOption !== null ? (int) $portOption : (int) config('xpos.default_port', 8000);
 
         try {

@@ -24,9 +24,12 @@ class ServeManager
     protected ?array $cachedPidData = null;
 
     /**
-     * Cached serving status.
+     * Cached serving status, keyed by requested host (C16). A bare bool memo
+     * would return the first probed host's result for every later host.
+     *
+     * @var array<string, bool>
      */
-    protected ?bool $cachedServingStatus = null;
+    protected array $cachedServingStatus = [];
 
     public function __construct(?string $basePath = null)
     {
@@ -35,19 +38,21 @@ class ServeManager
     }
 
     /**
-     * Check if artisan serve is currently running for this project.
+     * Check if artisan serve is currently running for this project ON the given
+     * host. The tracked serve must match the requested host AND be live on it
+     * (C16) — a serve bound to a different interface is NOT a match for $host.
      */
-    public function isServing(): bool
+    public function isServing(string $host = '127.0.0.1'): bool
     {
-        // Return cached result if available
-        if ($this->cachedServingStatus !== null) {
-            return $this->cachedServingStatus;
+        // Return cached result if available (memo is per-host).
+        if (array_key_exists($host, $this->cachedServingStatus)) {
+            return $this->cachedServingStatus[$host];
         }
 
         $data = $this->readPidFile();
 
         if (!$data) {
-            return $this->cachedServingStatus = false;
+            return $this->cachedServingStatus[$host] = false;
         }
 
         // Verify PID is still alive. Cast to int explicitly so a malformed
@@ -56,16 +61,24 @@ class ServeManager
         // non-numeric coercion deprecation warnings as well.
         if (!$this->isProcessRunning((int)($data['pid'] ?? 0))) {
             $this->cleanup();
-            return $this->cachedServingStatus = false;
+            return $this->cachedServingStatus[$host] = false;
         }
 
-        // Verify port is actually listening
-        if (!$this->isPortListening($data['port'])) {
+        // The tracked serve must be for the requested host. A legacy PID file
+        // (written before host was persisted) has no 'host' — treat it as the
+        // loopback default so an upgrade reuses correctly against --host=127.0.0.1.
+        $storedHost = isset($data['host']) ? (string)$data['host'] : '127.0.0.1';
+        if ($storedHost !== $host) {
+            return $this->cachedServingStatus[$host] = false;
+        }
+
+        // Verify port is actually listening on that host.
+        if (!$this->isPortListening((int)$data['port'], $host)) {
             $this->cleanup();
-            return $this->cachedServingStatus = false;
+            return $this->cachedServingStatus[$host] = false;
         }
 
-        return $this->cachedServingStatus = true;
+        return $this->cachedServingStatus[$host] = true;
     }
 
     /**
@@ -79,16 +92,38 @@ class ServeManager
     }
 
     /**
-     * Get the port if serve is running, null otherwise.
-     * Combined method to avoid double-checking.
+     * Get the port if serve is running on $host, null otherwise.
      */
-    public function getRunningPort(): ?int
+    public function getRunningPort(string $host = '127.0.0.1'): ?int
     {
-        if (!$this->isServing()) {
+        if (!$this->isServing($host)) {
             return null;
         }
 
         return $this->getPort();
+    }
+
+    /**
+     * Return the tracked serve's [host, port] when its PID is alive, regardless
+     * of whether the host matches the caller's request — so the caller can
+     * decide between reuse (matching host), a wedged-serve restart (matching
+     * host but dead port), or a warn-and-fail (live serve on a different host,
+     * which must NOT be orphaned). Cleans up a dead PID file and returns null.
+     *
+     * @return array{host: string, port: int}|null
+     */
+    public function runningServe(): ?array
+    {
+        $data = $this->readPidFile();
+        if (!$data) {
+            return null;
+        }
+        if (!$this->isProcessRunning((int)($data['pid'] ?? 0))) {
+            $this->cleanup();
+            return null;
+        }
+        $storedHost = isset($data['host']) ? (string)$data['host'] : '127.0.0.1';
+        return ['host' => $storedHost, 'port' => (int)$data['port']];
     }
 
     /**
@@ -98,8 +133,9 @@ class ServeManager
      */
     public function startServe(int $port = 8000, string $host = '127.0.0.1'): array
     {
-        // Find available port starting from the given port
-        $port = $this->findAvailablePort($port);
+        // Find available port starting from the given port — probe the SAME
+        // host the serve will bind (C16), not the loopback default.
+        $port = $this->findAvailablePort($port, 10, $host);
 
         // Build the command
         $phpBinary = PHP_BINARY;
@@ -144,11 +180,12 @@ class ServeManager
         // and cleans up — the same graceful path as before strict types.
         $pid = (int) $process->getPid();
 
-        // Write PID file
-        $this->writePidFile($port, $pid);
+        // Write PID file (persist the bind host so reuse/probing keys off the
+        // same interface).
+        $this->writePidFile($port, $pid, $host);
 
-        // Invalidate cache
-        $this->cachedServingStatus = true;
+        // Invalidate cache — memo this host's now-true status, drop the rest.
+        $this->cachedServingStatus = [$host => true];
         $this->cachedPidData = null;
 
         return [
@@ -161,12 +198,14 @@ class ServeManager
     /**
      * Find an available port starting from the given port.
      */
-    public function findAvailablePort(int $startPort = 8000, int $maxTries = 10): int
+    public function findAvailablePort(int $startPort = 8000, int $maxTries = 10, string $host = '127.0.0.1'): int
     {
         for ($i = 0; $i < $maxTries; $i++) {
             $port = $startPort + $i;
 
-            if (!$this->isPortListening($port)) {
+            // Probe the SAME host the serve will bind (C16) — a loopback-only
+            // probe gives false "available" verdicts for a specific interface.
+            if (!$this->isPortListening($port, $host)) {
                 return $port;
             }
         }
@@ -222,9 +261,10 @@ class ServeManager
     }
 
     /**
-     * Read the PID file.
+     * Read the PID file. `host` is absent in legacy (pre-host) PID files;
+     * callers default it to '127.0.0.1'.
      *
-     * @return array{port: int, pid: int, started: int}|null
+     * @return array{port: int, pid: int, started: int, host?: string}|null
      */
     public function readPidFile(): ?array
     {
@@ -269,11 +309,12 @@ class ServeManager
     /**
      * Write the PID file.
      */
-    public function writePidFile(int $port, int $pid): void
+    public function writePidFile(int $port, int $pid, string $host = '127.0.0.1'): void
     {
         $data = [
             'port' => $port,
             'pid' => $pid,
+            'host' => $host,
             'started' => time(),
         ];
 
@@ -300,7 +341,7 @@ class ServeManager
 
         // Invalidate cache
         $this->cachedPidData = null;
-        $this->cachedServingStatus = null;
+        $this->cachedServingStatus = [];
     }
 
     /**

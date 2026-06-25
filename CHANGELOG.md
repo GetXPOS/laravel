@@ -5,7 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.5] - 2026-06-25
+
+### Fixed
+- Catch a constructor `InvalidArgumentException` (bad `--host`/`--subdomain`/
+  `--domain`) and clean up instead of crashing the command and leaking the
+  `artisan serve` child + `.xpos.pid`.
+- Stop the tunnel output buffer growing without bound — output is still
+  forwarded to the `onOutput` callback, but the parse buffer no longer
+  accumulates (and re-scans) for the tunnel's lifetime.
+- Capture a tunnel's `Expires:` line even when it lands in a later read chunk
+  than the URL, via a short bounded pre-resolve window before `start()` returns.
+- Detect an `Error:` line split across a read-chunk boundary.
+- Thread the requested `--host` through find-port / start / running-detection so
+  a non-loopback `--host` is probed on the right interface, the bind host is
+  persisted in `.xpos.pid`, the serving-status memo is keyed by host, and a live
+  tracked serve on a different host is reported (not silently orphaned). Legacy
+  PID files (no stored host) are treated as `127.0.0.1` for back-compat.
+- Warn when an explicit `--port` is overridden by an already-running tracked
+  serve instead of silently dropping it.
 
 ### Added
 - SSH host-key pinning from the `xpos.dev` `.well-known/ssh-host-keys` endpoint.
