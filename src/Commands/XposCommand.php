@@ -160,10 +160,15 @@ class XposCommand extends Command
         try {
             $this->tunnel->start();
         } catch (\RuntimeException $e) {
-            // Only show connection-level errors (timeout, process death)
-            // SSH "Error: ..." lines were already displayed by onOutput callback
+            // M2: surface ALL setup/connection failures. The previous prefix
+            // filter ('Tunnel connection' / 'Tunnel is already') silently
+            // swallowed pre-SSH setup exceptions (host-key pinning, ssh_config
+            // write), leaving the user with a bare FAILURE and no message. The
+            // SSH "Error: ..." stdout lines are printed separately by the
+            // onOutput callback above, so this is the SDK's own exception
+            // message and won't double-print them.
             $msg = $e->getMessage();
-            if (str_starts_with($msg, 'Tunnel connection') || str_starts_with($msg, 'Tunnel is already')) {
+            if ($msg !== '') {
                 $this->newLine();
                 $this->error('  ' . $msg);
             }

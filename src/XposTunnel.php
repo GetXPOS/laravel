@@ -331,6 +331,10 @@ class XposTunnel
             return;
         }
 
+        // Only emit onClose for a tunnel that actually connected — a failed
+        // start() (process spawned but never connected) shouldn't fire a close
+        // event without a matching connect.
+        $wasConnected = $this->connected;
         $this->connected = false;
 
         if ($this->process->isRunning()) {
@@ -341,7 +345,7 @@ class XposTunnel
         $this->cleanupHostKeys();
         $this->cleanupSshConfig();
 
-        if ($this->onCloseCallback) {
+        if ($wasConnected && $this->onCloseCallback) {
             ($this->onCloseCallback)(null);
         }
     }
@@ -655,22 +659,6 @@ class XposTunnel
         }
 
         return $this->token;
-    }
-
-    /**
-     * Build the -R remote forward argument.
-     */
-    private function buildRemoteForward(): string
-    {
-        if ($this->domain) {
-            return "{$this->domain}:80:{$this->host}:{$this->port}";
-        }
-
-        if ($this->subdomain) {
-            return "{$this->subdomain}:80:{$this->host}:{$this->port}";
-        }
-
-        return "0:{$this->host}:{$this->port}";
     }
 
     /**
