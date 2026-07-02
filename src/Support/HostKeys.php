@@ -35,6 +35,15 @@ class HostKeys
     private const FETCH_TIMEOUT_S = 5;
 
     /**
+     * Cap on the well-known response body (64 KiB — parity with the Go /
+     * Node / Python SDKs' N4 hardening). The stream timeout is a per-read
+     * stall timeout, not a total wall-clock or byte bound, so without a
+     * maxlen a slowly-dripping endpoint could buffer an unbounded body
+     * into memory before json_decode.
+     */
+    private const MAX_FETCH_BYTES = 65536;
+
+    /**
      * Resolve a per-process known_hosts file path for the given server.
      *
      * Returns ['path' => null, 'cleanup' => fn] for custom servers so the
@@ -120,7 +129,7 @@ class HostKeys
             ],
         ]);
 
-        $body = @file_get_contents(self::URL, false, $ctx);
+        $body = @file_get_contents(self::URL, false, $ctx, 0, self::MAX_FETCH_BYTES);
         if ($body === false) {
             throw new \RuntimeException('ssh-host-keys: HTTP request failed');
         }
