@@ -373,6 +373,19 @@ class XposTunnel
     }
 
     /**
+     * F29: reclaim the ssh_config temp dir (a 0600 file holding the tk_ token)
+     * and the known_hosts dir if the tunnel is garbage-collected without an
+     * explicit close()/wait(). Uses the cleanup-only killProcess() path, NOT
+     * close() — firing the user's onClose callback during GC would be
+     * surprising. cleanupHostKeys()/cleanupSshConfig() are idempotent, so a
+     * later explicit close() remains safe.
+     */
+    public function __destruct()
+    {
+        $this->killProcess();
+    }
+
+    /**
      * Check if the tunnel is currently connected.
      */
     public function isConnected(): bool
