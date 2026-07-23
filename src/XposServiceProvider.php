@@ -40,8 +40,11 @@ class XposServiceProvider extends ServiceProvider
             ]);
         }
 
-        // Auto-configure TrustProxies for HTTPS
-        if (config('xpos.trust_proxies', true)) {
+        // Auto-configure TrustProxies for HTTPS. Default FALSE (explicit opt-in):
+        // configureTrustProxies() calls TrustProxies::at(), which REPLACES the
+        // host app's trusted-proxy list, and boot() runs every web request — a
+        // default-on package would clobber the application's own proxy config.
+        if (config('xpos.trust_proxies', false)) {
             $this->configureTrustProxies();
         }
     }
